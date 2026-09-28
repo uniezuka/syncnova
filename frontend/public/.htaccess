@@ -1,5 +1,10 @@
 # Hostinger (Apache): send every route that is not a real file to index.html,
 # so React Router can handle it. Without this, refreshing /dashboard gives a 404.
+# Some Apache setups serve .svg with the wrong type, so the browser won't show it.
+<IfModule mod_mime.c>
+  AddType image/svg+xml .svg .svgz
+</IfModule>
+
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /

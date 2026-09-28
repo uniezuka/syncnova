@@ -29,3 +29,10 @@ services:
         sync: false
       - key: MAX_UPLOAD_MB
         value: "25"
+      # Uploaded files go to Supabase Storage (Render's free disk is wiped on restart)
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: project-files

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { fileService } from "./file.service";
+import { fileStorage } from "./file.storage";
 import { BadRequestError } from "../../middleware/errors";
 
 export const fileController = {
@@ -27,12 +28,12 @@ export const fileController = {
   },
 
   async download(req: Request, res: Response) {
-    const { absolutePath, originalName } = await fileService.getDownload(
+    const { folder, fileName, originalName, mimeType } = await fileService.getDownload(
       req.params.projectId,
       req.params.fileId,
       req.user!.id
     );
-    res.download(absolutePath, originalName);
+    await fileStorage.sendDownload(res, folder, fileName, originalName, mimeType);
   },
 
   async remove(req: Request, res: Response) {

@@ -26,4 +26,9 @@ export const env = {
   // Where uploaded project files are stored. Each project gets its own subfolder here.
   uploadsDir: path.resolve(process.cwd(), process.env.UPLOADS_DIR ?? "uploads"),
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB ?? 25),
+  // Optional. When SUPABASE_URL and SUPABASE_SERVICE_KEY are both set, uploaded files go
+  // to this Supabase Storage bucket instead of uploadsDir (e.g. on hosts with no lasting disk).
+  supabaseUrl: process.env.SUPABASE_URL ?? "",
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY ?? "",
+  supabaseBucket: process.env.SUPABASE_BUCKET || "project-files",
 };

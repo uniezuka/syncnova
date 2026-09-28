@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url       = env("DATABASE_URL")
+  // Used only by migrations. On Supabase this is the session pooler (port 5432);
+  // DATABASE_URL is the transaction pooler (port 6543). Locally, both are the same.
+  directUrl = env("DIRECT_URL")
+}
+
+enum ProjectRole {
+  OWNER
+  MEMBER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  FOR_REVIEW
+  REJECTED
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TaskType {
+  TASK
+  BUG
+  FEATURE
+  CHORE
+  IMPROVEMENT
+  DOCUMENTATION
+}
+
+model User {
+  id             String          @id @default(uuid())
+  email          String          @unique
+  passwordHash   String
+  name           String
+  createdAt      DateTime        @default(now())
+  createdClients Client[]        @relation("ClientCreator")
+  ownedProjects  Project[]       @relation("ProjectOwner")
+  memberships    ProjectMember[]
+  assignedTasks  Task[]          @relation("TaskAssignee")
+  createdTasks   Task[]          @relation("TaskCreator")
+  uploadedFiles  ProjectFile[]   @relation("FileUploader")
+  taskActivity   TaskActivity[]  @relation("TaskActivityUser")
+  timeEntries    TimeEntry[]     @relation("TimeEntryUser")
+}
+
+model Client {
+  id             String    @id @default(uuid())
+  name           String
+  notes          String?
+  contactName    String?
+  contactEmail   String?
+  contactPhone   String?
+  billingAddress String?
+  creatorId      String
+  creator        User      @relation("ClientCreator", fields: [creatorId], references: [id])
+  projects       Project[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Project {
+  id          String          @id @default(uuid())
+  name        String
+  description String?
+  notes       String?
+  url         String?
+  stagingUrl  String?
+  devUrl      String?
+  // Folder name (under the uploads root) holding this project's files. Set once, the
+  // first time a file is uploaded, and never changed afterward even if the project or
+  // client is renamed later - so existing file links never break.
+  filesFolder String?
+  clientId    String
+  client      Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  ownerId     String
+  owner       User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members     ProjectMember[]
+  tasks       Task[]
+  files       ProjectFile[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+model ProjectMember {
+  id        String      @id @default(uuid())
+  projectId String
+  userId    String
+  role      ProjectRole @default(MEMBER)
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+}
+
+model Task {
+  id          String         @id @default(uuid())
+  title       String
+  description String?
+  notes       String?
+  status      TaskStatus     @default(TODO)
+  priority    TaskPriority   @default(MEDIUM)
+  type        TaskType       @default(TASK)
+  dueDate     DateTime?
+  position    Int            @default(0)
+  // Set only by an explicit "Archive" action (available once status is DONE or
+  // REJECTED). Once set, the task is locked - the service layer refuses further edits
+  // so the archive stays a reliable record. The only thing you can still do with it is
+  // duplicate it into a fresh To do task.
+  archivedAt  DateTime?
+  projectId   String
+  project     Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assigneeId  String?
+  assignee    User?          @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  creatorId   String
+  creator     User           @relation("TaskCreator", fields: [creatorId], references: [id])
+  activity    TaskActivity[]
+  timeEntries TimeEntry[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+
+// A day's worth of logged work by one person on one task. Powers the Reports page
+// (hours today, hours by project/client, etc). Kept separate from TaskActivity, which
+// is an automatic audit trail - this is a deliberate, user-entered number.
+model TimeEntry {
+  id        String    @id @default(uuid())
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation("TimeEntryUser", fields: [userId], references: [id])
+  date      DateTime  @db.Date
+  // Clock in/out, Hubstaff-style. Nullable only so entries logged before this feature
+  // existed keep working - every new entry always sets both.
+  startTime DateTime?
+  endTime   DateTime?
+  hours     Float
+  note      String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model TaskActivity {
+  id        String   @id @default(uuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("TaskActivityUser", fields: [userId], references: [id])
+  // Short machine tag ("created", "status_changed", "updated") plus a human-readable summary.
+  action    String
+  details   String?
+  createdAt DateTime @default(now())
+}
+
+model ProjectFile {
+  id           String   @id @default(uuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // Name actually on disk (may differ from originalName if there was a collision).
+  fileName     String
+  originalName String
+  mimeType     String
+  size         Int
+  uploadedById String
+  uploadedBy   User     @relation("FileUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+}

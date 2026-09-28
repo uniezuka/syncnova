@@ -1,0 +1,31 @@
+# Render Blueprint for the SyncNova API.
+# In Render: New > Blueprint > pick this repo. It will ask for the "sync: false" values.
+services:
+  - type: web
+    name: syncnova-api
+    runtime: node
+    plan: free
+    rootDir: backend
+    # Dev dependencies (typescript, prisma) are needed to build.
+    # Migrations run here because the free plan has no pre-deploy step.
+    buildCommand: npm ci --include=dev && npm run build && npx prisma migrate deploy
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      # Supabase transaction pooler (port 6543), ending in ?pgbouncer=true
+      - key: DATABASE_URL
+        sync: false
+      # Supabase session pooler (port 5432), used by migrations
+      - key: DIRECT_URL
+        sync: false
+      # Your Hostinger site, e.g. https://syncnova.example.com (no trailing slash)
+      - key: CORS_ORIGIN
+        sync: false
+      - key: MAX_UPLOAD_MB
+        value: "25"

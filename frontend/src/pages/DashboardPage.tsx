@@ -6,19 +6,98 @@ import { useAuth } from "../context/AuthContext";
 import { tasksApi } from "../api/tasks";
 import { timeEntriesApi } from "../api/timeEntries";
 import { reportsApi } from "../api/reports";
-import type { AssignedTask, ReportSummary } from "../types";
+import type { AssignedTask, ReportSummary, TaskPriority } from "../types";
 import { ApiError } from "../api/client";
 import { PRIORITY_LABEL, STATUS_LABEL, TYPE_LABEL, statusClass } from "../taskLabels";
 import { TaskTypeIcon } from "../components/TaskTypeIcon";
 import {
   combineDateAndTime,
   compareRecentFirst,
+  formatClockTime,
   formatTimeRange,
+  isTimeEntryIncomplete,
   previewHours,
   todayLocalDate,
 } from "../utils/timeEntry";
 
 const ALL_TIME_FROM = "2000-01-01";
+
+const PRIORITY_OPTIONS: TaskPriority[] = ["HIGH", "MEDIUM", "LOW"];
+
+const PRIORITY_RANK: Record<TaskPriority, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+
+function isTaskOverdue(task: AssignedTask) {
+  return Boolean(task.dueDate && new Date(task.dueDate) < new Date());
+}
+
+// Inside a project: high priority first, then soonest due date (undated last).
+function compareTasksInProject(a: AssignedTask, b: AssignedTask) {
+  const byPriority = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+  if (byPriority !== 0) return byPriority;
+  const aDue = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+  const bDue = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+  return aDue - bDue;
+}
+
+interface ProjectGroup {
+  project: AssignedTask["project"];
+  tasks: AssignedTask[];
+  priorityCounts: Record<TaskPriority, number>;
+  overdueCount: number;
+}
+
+// One group per project. Projects with the most high priority (then overdue) work come
+// first, so urgent work stays at the top even though the list is no longer one flat sort.
+function groupTasksByProject(tasks: AssignedTask[]): ProjectGroup[] {
+  const groups = new Map<string, ProjectGroup>();
+  for (const task of tasks) {
+    let group = groups.get(task.project.id);
+    if (!group) {
+      group = {
+        project: task.project,
+        tasks: [],
+        priorityCounts: { HIGH: 0, MEDIUM: 0, LOW: 0 },
+        overdueCount: 0,
+      };
+      groups.set(task.project.id, group);
+    }
+    group.tasks.push(task);
+    group.priorityCounts[task.priority] += 1;
+    if (isTaskOverdue(task)) group.overdueCount += 1;
+  }
+  for (const group of groups.values()) group.tasks.sort(compareTasksInProject);
+  return [...groups.values()].sort(
+    (a, b) =>
+      b.priorityCounts.HIGH - a.priorityCounts.HIGH ||
+      b.overdueCount - a.overdueCount ||
+      a.project.name.localeCompare(b.project.name)
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`project-group-chevron ${open ? "open" : ""}`}
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+// What to show for an entry that has only a start or only an end time, e.g. a clock-in
+// with no clock-out yet. Its hours are 0 until both are set, so the time itself is the
+// useful part.
+function incompleteTimeLabel(entry: { startTime: string | null; endTime: string | null }) {
+  if (entry.startTime) return `Started ${formatClockTime(entry.startTime)}`;
+  if (entry.endTime) return `Ended ${formatClockTime(entry.endTime)}`;
+  return null;
+}
 
 function ClockIcon() {
   return (
@@ -50,8 +129,20 @@ export function DashboardPage() {
   const [quickLogError, setQuickLogError] = useState<string | null>(null);
   const [loggingTaskId, setLoggingTaskId] = useState<string | null>(null);
 
-  const [clientFilter, setClientFilter] = useState("");
-  const [projectFilter, setProjectFilter] = useState("");
+  // Every project group starts open; collapsing one adds its project id here.
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+
+  function toggleProject(projectId: string) {
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        next.add(projectId);
+      }
+      return next;
+    });
+  }
 
   const [timeSummary, setTimeSummary] = useState<ReportSummary | null>(null);
   // Every task's "Time logged" starts collapsed; expanding one adds its id here.
@@ -136,27 +227,8 @@ export function DashboardPage() {
     }
   }
 
-  // Filter options come from the tasks themselves, so only clients/projects with open tasks show.
-  const clientOptions = [...new Map(tasks.map((t) => [t.project.client.id, t.project.client.name]))]
-    .sort((a, b) => a[1].localeCompare(b[1]));
-  const projectOptions = [
-    ...new Map(
-      tasks
-        .filter((t) => !clientFilter || t.project.client.id === clientFilter)
-        .map((t) => [t.project.id, t.project.name])
-    ),
-  ].sort((a, b) => a[1].localeCompare(b[1]));
-
-  const visibleTasks = tasks.filter(
-    (t) =>
-      (!clientFilter || t.project.client.id === clientFilter) &&
-      (!projectFilter || t.project.id === projectFilter)
-  );
-  const isFiltered = Boolean(clientFilter || projectFilter);
-
-  const overdueCount = visibleTasks.filter(
-    (t) => t.dueDate && new Date(t.dueDate) < new Date()
-  ).length;
+  const overdueCount = tasks.filter(isTaskOverdue).length;
+  const projectGroups = groupTasksByProject(tasks);
 
   return (
     <Layout>
@@ -166,63 +238,13 @@ export function DashboardPage() {
         <h3>My tasks</h3>
         {!loading && tasks.length > 0 && (
           <p className="subtitle">
-            {isFiltered
-              ? `${visibleTasks.length} of ${tasks.length} open tasks`
-              : `${tasks.length} open task${tasks.length === 1 ? "" : "s"}`}{" "}
-            assigned to you
+            {tasks.length} open task{tasks.length === 1 ? "" : "s"} assigned to you
             {overdueCount > 0 && (
               <span className="task-due overdue"> · {overdueCount} overdue</span>
             )}
           </p>
         )}
       </div>
-
-      {!loading && tasks.length > 0 && (
-        <div className="report-filters dashboard-filters">
-          <div className="report-filters-row">
-            <label className="report-filter-wide">
-              Client
-              <select
-                value={clientFilter}
-                onChange={(e) => {
-                  setClientFilter(e.target.value);
-                  setProjectFilter("");
-                }}
-              >
-                <option value="">All clients</option>
-                {clientOptions.map(([id, name]) => (
-                  <option key={id} value={id}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="report-filter-wide">
-              Project
-              <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
-                <option value="">All projects</option>
-                {projectOptions.map(([id, name]) => (
-                  <option key={id} value={id}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {isFiltered && (
-              <button
-                type="button"
-                className="secondary btn-sm"
-                onClick={() => {
-                  setClientFilter("");
-                  setProjectFilter("");
-                }}
-              >
-                Clear filters
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {error && <div className="error-banner">{error}</div>}
 
@@ -233,131 +255,184 @@ export function DashboardPage() {
           No open tasks assigned to you. Browse your <Link to="/clients">clients</Link> to find
           something to work on.
         </p>
-      ) : visibleTasks.length === 0 ? (
-        <p className="empty-state">No open tasks match these filters.</p>
       ) : (
-        <div className="task-row-list">
-          {visibleTasks.map((task) => {
-            const isOverdue = task.dueDate && new Date(task.dueDate) < new Date();
-            const priorityClass = `priority-${task.priority.toLowerCase()}`;
-            const isOpen = openTaskId === task.id;
-            const taskTimeEntries = (
-              timeSummary?.entries.filter((e) => e.task.id === task.id) ?? []
-            ).sort(compareRecentFirst);
-            // Round to avoid float drift like 1.4100000000000001 when summing hours.
-            const taskTimeHours =
-              Math.round(taskTimeEntries.reduce((sum, e) => sum + e.hours, 0) * 100) / 100;
-            const timeLogOpen = openTimeLogs.has(task.id);
+        <div className="project-group-list">
+          {projectGroups.map((group) => {
+            const groupOpen = !collapsedProjects.has(group.project.id);
             return (
-              <div key={task.id} className={`task-row ${statusClass(task.status)}`}>
-                <Link
-                  to={`/projects/${task.project.id}/tasks/${task.id}`}
-                  state={{ from: "/dashboard" }}
-                  className="task-row-link"
+              <section key={group.project.id} className="project-group">
+                <button
+                  type="button"
+                  className="project-group-header"
+                  aria-expanded={groupOpen}
+                  onClick={() => toggleProject(group.project.id)}
                 >
-                  <span className={`priority-badge ${priorityClass}`}>
-                    {PRIORITY_LABEL[task.priority]}
+                  <ChevronIcon open={groupOpen} />
+                  <span className="project-group-title">
+                    <span className="project-group-name">{group.project.name}</span>
+                    <span className="project-group-client">{group.project.client.name}</span>
                   </span>
-                  <div className="task-row-main">
-                    <p className="task-title">{task.title}</p>
-                    <p className="task-row-meta">
-                      <span className="meta-client">
-                        <span className="meta-label">Client:</span> {task.project.client.name}
+                  <span className="project-group-counts">
+                    {PRIORITY_OPTIONS.filter((p) => group.priorityCounts[p] > 0).map((p) => (
+                      <span
+                        key={p}
+                        className={`priority-badge priority-${p.toLowerCase()}`}
+                        title={`${group.priorityCounts[p]} ${PRIORITY_LABEL[p]} priority`}
+                      >
+                        {group.priorityCounts[p]} {PRIORITY_LABEL[p]}
                       </span>
-                      <span className="meta-sep">·</span>
-                      <span className="meta-project">
-                        <span className="meta-label">Project:</span> {task.project.name}
+                    ))}
+                    {group.overdueCount > 0 && (
+                      <span className="project-group-overdue">
+                        {group.overdueCount} overdue
                       </span>
-                    </p>
-                  </div>
-                  <span className="role-tag">
-                    <TaskTypeIcon type={task.type} />
-                    {TYPE_LABEL[task.type]}
-                  </span>
-                  <span className="role-tag">{STATUS_LABEL[task.status]}</span>
-                  {task.dueDate && (
-                    <span className={`task-due ${isOverdue ? "overdue" : ""}`}>
-                      Due {new Date(task.dueDate).toLocaleDateString()}
+                    )}
+                    <span className="count">
+                      {group.tasks.length} task{group.tasks.length === 1 ? "" : "s"}
                     </span>
-                  )}
-                </Link>
+                  </span>
+                </button>
 
-                <div className={`task-row-quicklog ${isOpen ? "quicklog-open" : ""}`}>
-                  {isOpen ? (
-                    <form className="quick-log-form" onSubmit={(e) => handleQuickLog(e, task)}>
-                      {quickLogError && <span className="error-banner">{quickLogError}</span>}
-                      <input
-                        type="time"
-                        value={quickStart}
-                        onChange={(e) => setQuickStart(e.target.value)}
-                        autoFocus
-                      />
-                      <span className="time-log-sep">to</span>
-                      <input
-                        type="time"
-                        value={quickEnd}
-                        onChange={(e) => setQuickEnd(e.target.value)}
-                      />
-                      {previewHours(todayLocalDate(), quickStart, quickEnd) !== null && (
-                        <span className="time-log-preview">
-                          = {previewHours(todayLocalDate(), quickStart, quickEnd)}h
-                        </span>
-                      )}
-                      <textarea
-                        rows={2}
-                        placeholder="Note (optional)"
-                        value={quickNote}
-                        onChange={(e) => setQuickNote(e.target.value)}
-                      />
-                      <button type="submit" disabled={loggingTaskId === task.id}>
-                        {loggingTaskId === task.id ? "Saving..." : "Save"}
-                      </button>
-                      <button type="button" className="secondary" onClick={() => setOpenTaskId(null)}>
-                        Cancel
-                      </button>
-                    </form>
-                  ) : (
-                    <button
-                      type="button"
-                      className="secondary btn-sm"
-                      onClick={() => openQuickLog(task.id)}
-                    >
-                      Log time
-                    </button>
-                  )}
-                </div>
+                {groupOpen && (
+                  <div className="task-row-list">
+                    {group.tasks.map((task) => {
+                      const isOverdue = isTaskOverdue(task);
+                      const priorityClass = `priority-${task.priority.toLowerCase()}`;
+                      const isOpen = openTaskId === task.id;
+                      const taskTimeEntries = (
+                        timeSummary?.entries.filter((e) => e.task.id === task.id) ?? []
+                      ).sort(compareRecentFirst);
+                      // Round to avoid float drift like 1.4100000000000001 when summing hours.
+                      const taskTimeHours =
+                        Math.round(taskTimeEntries.reduce((sum, e) => sum + e.hours, 0) * 100) / 100;
+                      const timeLogOpen = openTimeLogs.has(task.id);
+                      // Newest entry that still misses its start or end time, if any.
+                      const incompleteEntry = taskTimeEntries.find(isTimeEntryIncomplete);
+                      return (
+                        <div
+                          key={task.id}
+                          className={`task-row ${statusClass(task.status)} ${priorityClass}`}
+                        >
+                          <Link
+                            to={`/projects/${task.project.id}/tasks/${task.id}`}
+                            state={{ from: "/dashboard" }}
+                            className="task-row-link"
+                          >
+                            <span className={`priority-badge ${priorityClass}`}>
+                              {PRIORITY_LABEL[task.priority]}
+                            </span>
+                            <div className="task-row-main">
+                              <p className="task-title">{task.title}</p>
+                            </div>
+                            <span className="role-tag">
+                              <TaskTypeIcon type={task.type} />
+                              {TYPE_LABEL[task.type]}
+                            </span>
+                            <span className="role-tag">{STATUS_LABEL[task.status]}</span>
+                            {task.dueDate && (
+                              <span className={`task-due ${isOverdue ? "overdue" : ""}`}>
+                                Due {new Date(task.dueDate).toLocaleDateString()}
+                              </span>
+                            )}
+                          </Link>
 
-                {taskTimeEntries.length > 0 && (
-                  <details
-                    className="task-time-log"
-                    open={timeLogOpen}
-                    onToggle={(e) => setTaskTimeLogOpen(task.id, e.currentTarget.open)}
-                  >
-                    <summary>
-                      <ClockIcon />
-                      <span className="task-time-log-label">Time logged</span>
-                      <span className="count">{taskTimeHours}h</span>
-                    </summary>
-                    <ul className="task-time-entries">
-                      {taskTimeEntries.map((entry) => {
-                        const range = formatTimeRange(entry.startTime, entry.endTime);
-                        return (
-                          <li key={entry.id} className="task-time-entry">
-                            <span className="task-time-entry-date">
-                              {new Date(entry.date).toLocaleDateString()}
-                            </span>
-                            <span className="task-time-entry-range">
-                              {range ?? `${entry.hours}h logged`}
-                            </span>
-                            {range && <span className="task-time-entry-hours">{entry.hours}h</span>}
-                            {entry.note && <span className="task-time-entry-note">{entry.note}</span>}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </details>
+                          <div className={`task-row-quicklog ${isOpen ? "quicklog-open" : ""}`}>
+                            {isOpen ? (
+                              <form className="quick-log-form" onSubmit={(e) => handleQuickLog(e, task)}>
+                                {quickLogError && <span className="error-banner">{quickLogError}</span>}
+                                <input
+                                  type="time"
+                                  value={quickStart}
+                                  onChange={(e) => setQuickStart(e.target.value)}
+                                  autoFocus
+                                />
+                                <span className="time-log-sep">to</span>
+                                <input
+                                  type="time"
+                                  value={quickEnd}
+                                  onChange={(e) => setQuickEnd(e.target.value)}
+                                />
+                                {previewHours(todayLocalDate(), quickStart, quickEnd) !== null && (
+                                  <span className="time-log-preview">
+                                    = {previewHours(todayLocalDate(), quickStart, quickEnd)}h
+                                  </span>
+                                )}
+                                <textarea
+                                  rows={2}
+                                  placeholder="Note (optional)"
+                                  value={quickNote}
+                                  onChange={(e) => setQuickNote(e.target.value)}
+                                />
+                                <button type="submit" disabled={loggingTaskId === task.id}>
+                                  {loggingTaskId === task.id ? "Saving..." : "Save"}
+                                </button>
+                                <button type="button" className="secondary" onClick={() => setOpenTaskId(null)}>
+                                  Cancel
+                                </button>
+                              </form>
+                            ) : (
+                              <button
+                                type="button"
+                                className="secondary btn-sm"
+                                onClick={() => openQuickLog(task.id)}
+                              >
+                                Log time
+                              </button>
+                            )}
+                          </div>
+
+                          {taskTimeEntries.length > 0 && (
+                            <details
+                              className="task-time-log"
+                              open={timeLogOpen}
+                              onToggle={(e) => setTaskTimeLogOpen(task.id, e.currentTarget.open)}
+                            >
+                              <summary>
+                                <ClockIcon />
+                                <span className="task-time-log-label">Time logged</span>
+                                {incompleteEntry && (
+                                  <span className="time-entry-warning">
+                                    {incompleteTimeLabel(incompleteEntry)} · not finished
+                                  </span>
+                                )}
+                                <span className="count">{taskTimeHours}h</span>
+                              </summary>
+                              <ul className="task-time-entries">
+                                {taskTimeEntries.map((entry) => {
+                                  const range = formatTimeRange(entry.startTime, entry.endTime);
+                                  const incomplete = isTimeEntryIncomplete(entry);
+                                  return (
+                                    <li
+                                      key={entry.id}
+                                      className={`task-time-entry ${incomplete ? "time-entry-incomplete" : ""}`}
+                                    >
+                                      <span className="task-time-entry-date">
+                                        {new Date(entry.date).toLocaleDateString()}
+                                      </span>
+                                      <span className="task-time-entry-range">
+                                        {incomplete
+                                          ? incompleteTimeLabel(entry)
+                                          : range ?? `${entry.hours}h logged`}
+                                      </span>
+                                      {incomplete && (
+                                        <span className="time-entry-warning">
+                                          missing {entry.startTime ? "end" : "start"} time
+                                        </span>
+                                      )}
+                                      {range && <span className="task-time-entry-hours">{entry.hours}h</span>}
+                                      {entry.note && <span className="task-time-entry-note">{entry.note}</span>}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-              </div>
+              </section>
             );
           })}
         </div>

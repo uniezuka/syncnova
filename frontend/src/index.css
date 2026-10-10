@@ -838,6 +838,7 @@ label {
   background: var(--danger-bg);
   border-radius: 999px;
   padding: 2px 10px;
+  white-space: nowrap;
 }
 
 .project-group .task-row-list {
@@ -849,12 +850,11 @@ label {
   font-weight: 600;
 }
 
+/* Own line under the task title, starting at the left edge */
 .task-row-quicklog {
   display: flex;
-  justify-content: flex-end;
-}
-
-.task-row-quicklog.quicklog-open {
+  justify-content: flex-start;
+  gap: 8px;
   flex-basis: 100%;
 }
 
@@ -1329,11 +1329,42 @@ label {
   padding: 24px;
   width: 380px;
   max-width: 90vw;
+  /* Never taller than the screen; long content scrolls inside instead */
+  max-height: 90vh;
+  overflow-y: auto;
   box-shadow: var(--shadow-hover);
+}
+
+/* Modal where only the middle scrolls, so the title and buttons stay in view */
+.modal.modal-scroll {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-scroll .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
+  scrollbar-width: thin;
 }
 
 .modal h3 {
   margin: 0 0 16px;
+}
+
+/* Small line under a modal title, e.g. the task the notes belong to */
+.modal-subtitle {
+  margin: -10px 0 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.modal-notes {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .more-details-link {
@@ -1354,7 +1385,7 @@ label {
 }
 
 .modal-wide {
-  width: 520px;
+  width: 720px;
 }
 
 .detail-list {
@@ -1371,10 +1402,14 @@ label {
 
 .detail-list dd {
   margin: 0;
+  /* Let the column shrink so long links and words wrap instead of widening the popup */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .detail-multiline {
   white-space: pre-wrap;
+  line-height: 1.5;
 }
 
 .task-fieldset {
@@ -1577,4 +1612,30 @@ label {
   .content {
     padding: 16px;
   }
+}
+
+/* Inline edit of a logged entry on the dashboard */
+.task-time-entry-editing {
+  flex-wrap: wrap;
+}
+
+.task-time-entry-editing .quick-log-form {
+  width: 100%;
+}
+
+.task-time-entry-editing .quick-log-form input[type="date"] {
+  width: auto;
+  min-width: 0;
+}
+
+.task-time-entry-edit {
+  margin-left: auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.time-entry-warning .link-button {
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 600;
 }

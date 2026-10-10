@@ -6,14 +6,18 @@ import { useAuth } from "../context/AuthContext";
 import { tasksApi } from "../api/tasks";
 import { timeEntriesApi } from "../api/timeEntries";
 import { reportsApi } from "../api/reports";
-import type { AssignedTask, ReportSummary, TaskPriority } from "../types";
+import type { AssignedTask, ReportEntry, ReportSummary, TaskPriority } from "../types";
 import { ApiError } from "../api/client";
 import { PRIORITY_LABEL, STATUS_LABEL, TYPE_LABEL, statusClass } from "../taskLabels";
 import { TaskTypeIcon } from "../components/TaskTypeIcon";
+import { TaskDetailsModal } from "../components/TaskDetailsModal";
+import { TaskNotesModal } from "../components/TaskNotesModal";
 import {
   combineDateAndTime,
   compareRecentFirst,
   formatClockTime,
+  formatLocalDate,
+  formatTimeInputValue,
   formatTimeRange,
   isTimeEntryIncomplete,
   previewHours,
@@ -128,12 +132,25 @@ export function DashboardPage() {
   const [quickNote, setQuickNote] = useState("");
   const [quickLogError, setQuickLogError] = useState<string | null>(null);
   const [loggingTaskId, setLoggingTaskId] = useState<string | null>(null);
+  // Task whose read-only details popup is open, if any.
+  const [detailsTask, setDetailsTask] = useState<AssignedTask | null>(null);
+  // Task whose notes popup is open, if any.
+  const [notesTask, setNotesTask] = useState<AssignedTask | null>(null);
 
-  // Every project group starts open; collapsing one adds its project id here.
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  // Inline edit of one logged entry, e.g. to add the end time after clocking in earlier.
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+  const [editDate, setEditDate] = useState("");
+  const [editStart, setEditStart] = useState("");
+  const [editEnd, setEditEnd] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // Every project group starts collapsed; opening one adds its project id here.
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
 
   function toggleProject(projectId: string) {
-    setCollapsedProjects((prev) => {
+    setExpandedProjects((prev) => {
       const next = new Set(prev);
       if (next.has(projectId)) {
         next.delete(projectId);
@@ -186,6 +203,7 @@ export function DashboardPage() {
   }, [user?.id]);
 
   function openQuickLog(taskId: string) {
+    setEditingEntryId(null);
     setOpenTaskId(taskId);
     setQuickStart("");
     setQuickEnd("");
@@ -227,6 +245,53 @@ export function DashboardPage() {
     }
   }
 
+  function startEditEntry(task: AssignedTask, entry: ReportEntry) {
+    // Only one form open at a time: close the quick log if it is open.
+    setOpenTaskId(null);
+    setTaskTimeLogOpen(task.id, true);
+    setEditingEntryId(entry.id);
+    setEditDate(formatLocalDate(new Date(entry.date)));
+    setEditStart(entry.startTime ? formatTimeInputValue(entry.startTime) : "");
+    setEditEnd(entry.endTime ? formatTimeInputValue(entry.endTime) : "");
+    setEditNote(entry.note ?? "");
+    setEditError(null);
+  }
+
+  function cancelEditEntry() {
+    setEditingEntryId(null);
+    setEditError(null);
+  }
+
+  async function handleSaveEntry(e: FormEvent, task: AssignedTask, entryId: string) {
+    e.preventDefault();
+    if (!editDate || (!editStart && !editEnd)) {
+      setEditError("Enter a date and a start time or an end time");
+      return;
+    }
+    const startTime = editStart ? combineDateAndTime(editDate, editStart) : undefined;
+    const endTime = editEnd ? combineDateAndTime(editDate, editEnd) : undefined;
+    if (startTime && endTime && new Date(endTime) <= new Date(startTime)) {
+      setEditError("End time must be after start time");
+      return;
+    }
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await timeEntriesApi.update(task.project.id, task.id, entryId, {
+        date: editDate,
+        startTime,
+        endTime,
+        note: editNote || undefined,
+      });
+      setEditingEntryId(null);
+      await loadTimeLog();
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : "Failed to save time entry");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   const overdueCount = tasks.filter(isTaskOverdue).length;
   const projectGroups = groupTasksByProject(tasks);
 
@@ -258,7 +323,7 @@ export function DashboardPage() {
       ) : (
         <div className="project-group-list">
           {projectGroups.map((group) => {
-            const groupOpen = !collapsedProjects.has(group.project.id);
+            const groupOpen = expandedProjects.has(group.project.id);
             return (
               <section key={group.project.id} className="project-group">
                 <button
@@ -371,13 +436,29 @@ export function DashboardPage() {
                                 </button>
                               </form>
                             ) : (
-                              <button
-                                type="button"
-                                className="secondary btn-sm"
-                                onClick={() => openQuickLog(task.id)}
-                              >
-                                Log time
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  className="secondary btn-sm"
+                                  onClick={() => openQuickLog(task.id)}
+                                >
+                                  Log time
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary btn-sm"
+                                  onClick={() => setDetailsTask(task)}
+                                >
+                                  Details
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary btn-sm"
+                                  onClick={() => setNotesTask(task)}
+                                >
+                                  Notes
+                                </button>
+                              </>
                             )}
                           </div>
 
@@ -393,6 +474,20 @@ export function DashboardPage() {
                                 {incompleteEntry && (
                                   <span className="time-entry-warning">
                                     {incompleteTimeLabel(incompleteEntry)} · not finished
+                                    {editingEntryId !== incompleteEntry.id && (
+                                      <button
+                                        type="button"
+                                        className="link-button"
+                                        onClick={(e) => {
+                                          // Inside <summary>: stop the click from toggling it.
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          startEditEntry(task, incompleteEntry);
+                                        }}
+                                      >
+                                        {incompleteEntry.startTime ? "add end time" : "add start time"}
+                                      </button>
+                                    )}
                                   </span>
                                 )}
                                 <span className="count">{taskTimeHours}h</span>
@@ -401,6 +496,56 @@ export function DashboardPage() {
                                 {taskTimeEntries.map((entry) => {
                                   const range = formatTimeRange(entry.startTime, entry.endTime);
                                   const incomplete = isTimeEntryIncomplete(entry);
+                                  if (editingEntryId === entry.id) {
+                                    const editHours = previewHours(editDate, editStart, editEnd);
+                                    return (
+                                      <li key={entry.id} className="task-time-entry task-time-entry-editing">
+                                        <form
+                                          className="quick-log-form"
+                                          onSubmit={(e) => handleSaveEntry(e, task, entry.id)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Escape") cancelEditEntry();
+                                          }}
+                                        >
+                                          {editError && <span className="error-banner">{editError}</span>}
+                                          <input
+                                            type="date"
+                                            value={editDate}
+                                            onChange={(e) => setEditDate(e.target.value)}
+                                            required
+                                          />
+                                          <input
+                                            type="time"
+                                            value={editStart}
+                                            onChange={(e) => setEditStart(e.target.value)}
+                                            autoFocus={!editStart}
+                                          />
+                                          <span className="time-log-sep">to</span>
+                                          <input
+                                            type="time"
+                                            value={editEnd}
+                                            onChange={(e) => setEditEnd(e.target.value)}
+                                            autoFocus={Boolean(editStart) && !editEnd}
+                                          />
+                                          {editHours !== null && (
+                                            <span className="time-log-preview">= {editHours}h</span>
+                                          )}
+                                          <textarea
+                                            rows={2}
+                                            placeholder="Note (optional)"
+                                            value={editNote}
+                                            onChange={(e) => setEditNote(e.target.value)}
+                                          />
+                                          <button type="submit" disabled={savingEdit}>
+                                            {savingEdit ? "Saving..." : "Save"}
+                                          </button>
+                                          <button type="button" className="secondary" onClick={cancelEditEntry}>
+                                            Cancel
+                                          </button>
+                                        </form>
+                                      </li>
+                                    );
+                                  }
                                   return (
                                     <li
                                       key={entry.id}
@@ -421,6 +566,15 @@ export function DashboardPage() {
                                       )}
                                       {range && <span className="task-time-entry-hours">{entry.hours}h</span>}
                                       {entry.note && <span className="task-time-entry-note">{entry.note}</span>}
+                                      {!editingEntryId && (
+                                        <button
+                                          type="button"
+                                          className="link-button task-time-entry-edit"
+                                          onClick={() => startEditEntry(task, entry)}
+                                        >
+                                          edit
+                                        </button>
+                                      )}
                                     </li>
                                   );
                                 })}
@@ -437,6 +591,16 @@ export function DashboardPage() {
           })}
         </div>
       )}
+
+      {detailsTask && (
+        <TaskDetailsModal
+          projectId={detailsTask.project.id}
+          taskId={detailsTask.id}
+          onClose={() => setDetailsTask(null)}
+        />
+      )}
+
+      {notesTask && <TaskNotesModal task={notesTask} onClose={() => setNotesTask(null)} />}
     </Layout>
   );
 }
